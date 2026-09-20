@@ -5,7 +5,8 @@ import async_timeout
 from bleak import BleakClient
 from bleak.exc import BleakError
 
-from ..const import WRITE_UUID
+from .encrypted_session import EncryptedSession
+from ..const import NOTIFY_UUID, WRITE_UUID
 from ..base_devices import BluettiDevice
 from ..utils.privacy import mac_loggable
 
@@ -33,11 +34,10 @@ class DeviceWriter:
             f"{__name__}.{mac_loggable(bleak_client.address).replace(':', '_')}"
         )
 
-    async def write(self, field: str, value: Any):
-        if self.config.use_encryption:
-            self.logger.error("Encryption on writes is not yet supported")
-            return
+        self.session = EncryptedSession(self.logger)
+        self.has_notifier = False
 
+    async def write(self, field: str, value: Any):
         available_fields = [f.name for f in self.bluetti_device.fields]
         if field not in available_fields:
             self.logger.error("Field not supported")
@@ -50,6 +50,7 @@ class DeviceWriter:
             return
 
         self.logger.debug("Writing to device register")
+        self.session.start()
 
         async with self.polling_lock:
             try:
@@ -60,12 +61,16 @@ class DeviceWriter:
 
                     self.logger.debug("Connected to device")
 
+                    command_bytes = bytes(command)
+
+                    if self.config.use_encryption is True:
+                        if not await self._handshake():
+                            return None
+                        command_bytes = self.session.encrypt_command(command_bytes)
+
                     self.logger.debug("Writing command: %s", command)
 
-                    await self.client.write_gatt_char(
-                        WRITE_UUID,
-                        bytes(command),
-                    )
+                    await self.client.write_gatt_char(WRITE_UUID, command_bytes)
 
                     self.logger.debug("Write successful")
 
@@ -79,5 +84,29 @@ class DeviceWriter:
                 self.logger.warning("Unknown error: %s", err)
                 return None
             finally:
+                if self.has_notifier:
+                    try:
+                        await self.client.stop_notify(NOTIFY_UUID)
+                    except BleakError:
+                        pass
+                    self.has_notifier = False
+                self.session.reset()
                 await self.client.disconnect()
                 self.logger.debug("Disconnected from device")
+
+    async def _handshake(self) -> bool:
+        """Wait for the key exchange the unit demands before it accepts a command."""
+        if not self.has_notifier:
+            await self.client.start_notify(NOTIFY_UUID, self._notification_handler)
+            self.has_notifier = True
+
+        while not self.session.is_ready:
+            if self.session.failed:
+                self.logger.warning("Handshake failed, not writing")
+                return False
+            await asyncio.sleep(0.2)
+
+        return True
+
+    async def _notification_handler(self, _: int, data: bytearray):
+        await self.session.consume(data, self.client)
