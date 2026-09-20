@@ -5,9 +5,8 @@ from typing import Any, Callable, List, cast
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
-from cryptography.exceptions import InvalidSignature
 
-from .encryption import BluettiEncryption, Message, MessageType, AES_BLOCK_SIZE
+from .encrypted_session import EncryptedSession
 from ..base_devices import BluettiDevice
 from ..const import NOTIFY_UUID, WRITE_UUID
 from ..registers import ReadableRegisters, DeviceRegister
@@ -50,9 +49,23 @@ class DeviceReader:
         self.current_registers = None
         self.notify_response = bytearray()
         self.notify_future: asyncio.Future[Any] | None = None
-        self.encryption = BluettiEncryption()
-        self.encrypted_buffer = bytearray()
-        self.handshake_failed = False
+        self.session = EncryptedSession(self.logger)
+
+    @property
+    def encryption(self):
+        return self.session.encryption
+
+    @property
+    def encrypted_buffer(self):
+        return self.session.buffer
+
+    @property
+    def handshake_failed(self) -> bool:
+        return self.session.failed
+
+    @handshake_failed.setter
+    def handshake_failed(self, value: bool):
+        self.session.failed = value
 
     async def read(
         self, only_registers: List[ReadableRegisters] | None = None, raw: bool = False
@@ -66,7 +79,7 @@ class DeviceReader:
             pack_registers = []
 
         parsed_data: dict = {}
-        self.handshake_failed = False
+        self.session.start()
 
         self.logger.debug("Reading device registers")
 
@@ -110,9 +123,9 @@ class DeviceReader:
 
                     while (
                         self.config.use_encryption
-                        and not self.encryption.is_ready_for_commands
+                        and not self.session.is_ready
                     ):
-                        if self.handshake_failed:
+                        if self.session.failed:
                             # Only a reconnect makes the peer send a fresh challenge.
                             self.logger.warning(
                                 "Handshake failed, reconnecting on the next read"
@@ -197,8 +210,7 @@ class DeviceReader:
                     await self.client.disconnect()
                     self.logger.debug("Disconnected from device")
 
-                self.encryption.reset()
-                self.encrypted_buffer.clear()
+                self.session.reset()
 
             # Check if dict is empty
             if not parsed_data:
@@ -211,17 +223,15 @@ class DeviceReader:
         self.current_registers = registers
         self.notify_response = bytearray()
         self.notify_future = self.create_future()
-        self.encrypted_buffer.clear()
+        self.session.buffer.clear()
 
         command_bytes = bytes(registers)
 
         # Encrypt command
         if self.config.use_encryption is True:
-            if not self.encryption.is_ready_for_commands:
+            if not self.session.is_ready:
                 return bytes()
-            command_bytes = self.encryption.aes_encrypt(
-                command_bytes, self.encryption.secure_aes_key, None
-            )
+            command_bytes = self.session.encrypt_command(command_bytes)
 
         try:
             # Make request
@@ -239,162 +249,23 @@ class DeviceReader:
             self.logger.warning("Error while reading data")
 
         return bytes()
-
-    def _calculate_expected_encrypted_length(self, buffer: bytearray) -> int | None:
-        """Calculate expected total length of an encrypted message."""
-        if len(buffer) < 2:
-            return None
-
-        data_len = (buffer[0] << 8) + buffer[1]
-
-        key, iv = self.encryption.getKeyIv()
-        if iv is None:
-            header_size = 6
-        else:
-            header_size = 2
-
-        padded_len = (
-            (data_len + AES_BLOCK_SIZE - 1) // AES_BLOCK_SIZE
-        ) * AES_BLOCK_SIZE
-
-        return header_size + padded_len
-
     async def _notification_handler(self, _: int, data: bytearray):
         """Handle bt data."""
         self.logger.debug("Got new data (%d bytes)", len(data))
 
         if self.config.use_encryption is True:
-            message = Message(data)
-
-            if message.is_pre_key_exchange:
-                message.verify_checksum()
-
-                if message.type == MessageType.CHALLENGE:
-                    challenge_response = self.encryption.msg_challenge(message)
-                    try:
-                        await self.client.write_gatt_char(WRITE_UUID, challenge_response)
-                    except BleakError as err:
-                        self.logger.warning(
-                            "Challenge response write failed: %s", err
-                        )
-                        self.handshake_failed = True
-                    return
-
-                if message.type == MessageType.CHALLENGE_ACCEPTED:
-                    self.logger.debug("Challenge accepted")
-                    return
-
+            payload = await self.session.consume(data, self.client)
+            if payload is None:
                 return
-
-            if self.encryption.unsecure_aes_key is None:
-                self.logger.error(
-                    "Received encrypted message before key initialization"
-                )
-                return
-
-            self.encrypted_buffer.extend(data)
-
-            expected_len = self._calculate_expected_encrypted_length(
-                self.encrypted_buffer
-            )
-
-            if expected_len is None:
-                return
-
-            if len(self.encrypted_buffer) < expected_len:
-                self.logger.debug(
-                    "Buffering fragment: %d/%d bytes",
-                    len(self.encrypted_buffer),
-                    expected_len,
-                )
-                return
-
-            complete_message = bytes(self.encrypted_buffer[:expected_len])
-
-            if len(self.encrypted_buffer) > expected_len:
-                self.encrypted_buffer = self.encrypted_buffer[expected_len:]
-            else:
-                self.encrypted_buffer.clear()
-
-            key, iv = self.encryption.getKeyIv()
-
-            try:
-                decrypted = Message(
-                    self.encryption.aes_decrypt(complete_message, key, iv)
-                )
-            except ValueError as e:
-                self.logger.error("Decryption failed: %s", e)
-                self.encrypted_buffer.clear()
-                return
-
-            if decrypted.is_pre_key_exchange:
-                decrypted.verify_checksum()
-
-                try:
-                    message_type = decrypted.type
-                except ValueError:
-                    self.logger.warning("Unknown key exchange message type")
-                    return
-
-                if message_type == MessageType.CHALLENGE:
-                    # Refreshes the IV the peer pubkey is later verified against.
-                    challenge_response = self.encryption.msg_challenge(decrypted)
-                    if challenge_response is not None:
-                        try:
-                            await self.client.write_gatt_char(
-                                WRITE_UUID,
-                                self.encryption.aes_encrypt(
-                                    challenge_response, key, None
-                                ),
-                            )
-                        except BleakError as err:
-                            self.logger.warning("Challenge write failed: %s", err)
-                            self.handshake_failed = True
-                    return
-
-                if message_type == MessageType.CHALLENGE_ACCEPTED:
-                    self.logger.debug("Challenge accepted (encrypted)")
-                    return
-
-                if message_type == MessageType.PEER_PUBKEY:
-                    try:
-                        peer_pubkey_response = self.encryption.msg_peer_pubkey(decrypted)
-                    except InvalidSignature:
-                        self.logger.warning(
-                            "Peer pubkey signature rejected, restarting handshake"
-                        )
-                        self.encryption.reset()
-                        self.encrypted_buffer.clear()
-                        self.handshake_failed = True
-                        return
-                    try:
-                        await self.client.write_gatt_char(
-                            WRITE_UUID, peer_pubkey_response
-                        )
-                    except BleakError as err:
-                        self.logger.warning("Peer pubkey write failed: %s", err)
-                        self.handshake_failed = True
-                    return
-
-                if message_type == MessageType.PUBKEY_ACCEPTED:
-                    self.encryption.msg_key_accepted(decrypted)
-                    return
-
-                return
-
-            # Handle as message
-            data = decrypted.buffer
+            data = payload
 
         if self.notify_future is None:
             return
 
         if self.notify_future.done():
-            # Future was already resolved or cancelled (e.g. response timeout),
-            # so this is a late or duplicate notification we can safely drop
             self.logger.debug("Dropping notification for already completed future")
             return
 
-        # Save data
         self.notify_response.extend(data)
 
         self.notify_future.set_result(self.notify_response)
