@@ -52,6 +52,7 @@ class DeviceReader:
         self.notify_future: asyncio.Future[Any] | None = None
         self.encryption = BluettiEncryption()
         self.encrypted_buffer = bytearray()
+        self.handshake_failed = False
 
     async def read(
         self, only_registers: List[ReadableRegisters] | None = None, raw: bool = False
@@ -65,6 +66,7 @@ class DeviceReader:
             pack_registers = []
 
         parsed_data: dict = {}
+        self.handshake_failed = False
 
         self.logger.debug("Reading device registers")
 
@@ -110,6 +112,12 @@ class DeviceReader:
                         self.config.use_encryption
                         and not self.encryption.is_ready_for_commands
                     ):
+                        if self.handshake_failed:
+                            # Only a reconnect makes the peer send a fresh challenge.
+                            self.logger.warning(
+                                "Handshake failed, reconnecting on the next read"
+                            )
+                            return None
                         await asyncio.sleep(5)
                         self.logger.debug("Encryption handshake not finished yet")
 
@@ -345,6 +353,7 @@ class DeviceReader:
                         )
                         self.encryption.reset()
                         self.encrypted_buffer.clear()
+                        self.handshake_failed = True
                         return
                     await self.client.write_gatt_char(WRITE_UUID, peer_pubkey_response)
                     return

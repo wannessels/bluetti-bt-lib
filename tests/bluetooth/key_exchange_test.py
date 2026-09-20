@@ -54,3 +54,19 @@ class TestInBandKeyExchange(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(reader.notify_response, bytearray())
         self.assertEqual(reader.client.writes, [])
+
+    async def test_rejected_pubkey_flags_the_read_to_reconnect(self):
+        reader = self.make_reader()
+        pubkey_data = bytes([1]) * 64
+        bad_signature = (bytes([1]) + bytes(31)) * 2
+        frame = wrap_encrypted(
+            reader.encryption, bytes([4, 0]) + pubkey_data + bad_signature
+        )
+
+        await reader._notification_handler(0, bytearray(frame))
+
+        self.assertTrue(reader.handshake_failed)
+        self.assertIsNone(reader.encryption.unsecure_aes_iv)
+        self.assertIsNone(reader.encryption.secure_aes_key)
+        self.assertEqual(reader.notify_response, bytearray())
+        self.assertEqual(reader.client.writes, [])
