@@ -226,6 +226,16 @@ class DeviceReader:
 
             return parsed_data
 
+    async def release(self):
+        """Give the device up so another client can take it.
+
+        A unit accepts one connection at a time, so a held link blocks the
+        writer and the vendor app until it is dropped.
+        """
+        self._generation += 1
+        async with self.polling_lock:
+            await self._teardown()
+
     def _keep_alive_wanted(self) -> bool:
         return (
             self.config.keep_alive_seconds > 0

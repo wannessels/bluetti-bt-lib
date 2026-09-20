@@ -102,3 +102,18 @@ class TestKeepAlive(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(reader.client)
         self.assertEqual(client.disconnects, 1)
+
+    async def test_release_hands_the_device_back(self):
+        reader, client = make_reader(30)
+
+        self.assertIsNotNone(await reader.read())
+        self.assertIsNotNone(reader.client)
+
+        await reader.release()
+
+        self.assertIsNone(reader.client)
+        self.assertEqual(client.disconnects, 1)
+
+        client.is_connected = True
+        self.assertIsNotNone(await reader.read())
+        self.assertEqual(client.notify_starts, 2)
