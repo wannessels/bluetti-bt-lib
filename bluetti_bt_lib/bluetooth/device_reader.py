@@ -271,7 +271,13 @@ class DeviceReader:
 
                 if message.type == MessageType.CHALLENGE:
                     challenge_response = self.encryption.msg_challenge(message)
-                    await self.client.write_gatt_char(WRITE_UUID, challenge_response)
+                    try:
+                        await self.client.write_gatt_char(WRITE_UUID, challenge_response)
+                    except BleakError as err:
+                        self.logger.warning(
+                            "Challenge response write failed: %s", err
+                        )
+                        self.handshake_failed = True
                     return
 
                 if message.type == MessageType.CHALLENGE_ACCEPTED:
@@ -334,10 +340,16 @@ class DeviceReader:
                     # Refreshes the IV the peer pubkey is later verified against.
                     challenge_response = self.encryption.msg_challenge(decrypted)
                     if challenge_response is not None:
-                        await self.client.write_gatt_char(
-                            WRITE_UUID,
-                            self.encryption.aes_encrypt(challenge_response, key, None),
-                        )
+                        try:
+                            await self.client.write_gatt_char(
+                                WRITE_UUID,
+                                self.encryption.aes_encrypt(
+                                    challenge_response, key, None
+                                ),
+                            )
+                        except BleakError as err:
+                            self.logger.warning("Challenge write failed: %s", err)
+                            self.handshake_failed = True
                     return
 
                 if message_type == MessageType.CHALLENGE_ACCEPTED:
@@ -355,7 +367,13 @@ class DeviceReader:
                         self.encrypted_buffer.clear()
                         self.handshake_failed = True
                         return
-                    await self.client.write_gatt_char(WRITE_UUID, peer_pubkey_response)
+                    try:
+                        await self.client.write_gatt_char(
+                            WRITE_UUID, peer_pubkey_response
+                        )
+                    except BleakError as err:
+                        self.logger.warning("Peer pubkey write failed: %s", err)
+                        self.handshake_failed = True
                     return
 
                 if message_type == MessageType.PUBKEY_ACCEPTED:
