@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from ..enums import EcoMode, DisplayMode, ChargingMode
+from ..enums import EcoMode, DisplayMode, ChargingMode, UpsMode
 from ..fields import (
     FieldName,
     UIntField,
@@ -25,6 +25,7 @@ class EL100V2(BaseDeviceV2):
                 DecimalField(FieldName.AC_INPUT_VOLTAGE, 1314, 1),
                 DecimalField(FieldName.AC_INPUT_CURRENT, 1315, 1),
                 DecimalField(FieldName.AC_OUTPUT_VOLTAGE, 1511, 1),
+                SelectField(FieldName.CTRL_UPS_MODE, 2005, UpsMode),
                 SwitchField(FieldName.CTRL_AC, 2011),
                 SwitchField(FieldName.CTRL_DC, 2012),
                 SwitchField(FieldName.CTRL_ECO_DC, 2014),

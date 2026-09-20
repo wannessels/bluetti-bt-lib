@@ -1,5 +1,5 @@
 from ..base_devices import BaseDeviceV2
-from ..enums import ChargingMode, DisplayMode, EcoMode
+from ..enums import ChargingMode, DisplayMode, EcoMode, UpsMode
 from ..fields import FieldName, UIntField, DecimalField, SwitchField, SelectField
 
 
@@ -13,6 +13,7 @@ class EL30V2(BaseDeviceV2):
                 UIntField(FieldName.DC_INPUT_POWER, 144),
                 UIntField(FieldName.AC_INPUT_POWER, 146),
                 DecimalField(FieldName.AC_INPUT_VOLTAGE, 1314, 1),
+                SelectField(FieldName.CTRL_UPS_MODE, 2005, UpsMode),
                 SwitchField(FieldName.CTRL_AC, 2011),
                 SwitchField(FieldName.CTRL_DC, 2012),
                 SwitchField(FieldName.CTRL_ECO_DC, 2014),
