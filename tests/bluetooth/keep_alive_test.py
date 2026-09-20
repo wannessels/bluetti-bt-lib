@@ -3,6 +3,8 @@ import unittest
 
 from bluetti_bt_lib import DeviceReader, DeviceReaderConfig
 from bluetti_bt_lib.base_devices import BaseDeviceV1
+from bleak.exc import BleakError
+
 from bluetti_bt_lib.utils.bleak_client_mock import ClientMockNoEncryption
 
 
@@ -12,6 +14,7 @@ class CountingClient(ClientMockNoEncryption):
         self.is_connected = True
         self.notify_starts = 0
         self.disconnects = 0
+        self.fail_writes = False
 
     async def start_notify(self, char_specifier, callback, **kwargs):
         self.notify_starts += 1
@@ -20,6 +23,11 @@ class CountingClient(ClientMockNoEncryption):
     async def disconnect(self):
         self.disconnects += 1
         self.is_connected = False
+
+    async def write_gatt_char(self, char_specifier, data, **kwargs):
+        if self.fail_writes:
+            raise BleakError("simulated link loss")
+        return await super().write_gatt_char(char_specifier, data, **kwargs)
 
 
 def make_reader(keep_alive: float):
@@ -85,3 +93,12 @@ class TestKeepAlive(unittest.IsolatedAsyncioTestCase):
         # The first release must not tear down the link the second read owns.
         self.assertEqual(client.disconnects, 0)
         self.assertIsNotNone(reader.client)
+
+    async def test_a_failed_read_does_not_keep_the_connection(self):
+        reader, client = make_reader(30)
+        client.fail_writes = True
+
+        self.assertIsNone(await reader.read())
+
+        self.assertIsNone(reader.client)
+        self.assertEqual(client.disconnects, 1)

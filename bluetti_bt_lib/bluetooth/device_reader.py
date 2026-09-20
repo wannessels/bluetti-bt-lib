@@ -58,6 +58,7 @@ class DeviceReader:
         self.notify_future: asyncio.Future[Any] | None = None
         self.session = EncryptedSession(self.logger)
         self._generation = 0
+        self._read_ok = False
 
     @property
     def encryption(self):
@@ -88,6 +89,7 @@ class DeviceReader:
 
         parsed_data: dict = {}
         self._generation += 1
+        self._read_ok = False
 
         self.logger.debug("Reading device registers")
 
@@ -201,6 +203,8 @@ class DeviceReader:
 
                             parsed_data.update(parsed)
 
+                    self._read_ok = bool(parsed_data)
+
             except TimeoutError:
                 self.logger.warning("Timeout")
                 return None
@@ -225,6 +229,7 @@ class DeviceReader:
     def _keep_alive_wanted(self) -> bool:
         return (
             self.config.keep_alive_seconds > 0
+            and self._read_ok
             and not self.session.failed
             and self.client is not None
         )
